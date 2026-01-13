@@ -1,0 +1,648 @@
+import React, { useState, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { createPageUrl } from '../utils';
+import { base44 } from '@/api/base44Client';
+import { format, addDays } from 'date-fns';
+import { 
+  Mic, 
+  MicOff, 
+  Upload,
+  FileText,
+  User,
+  Building2,
+  Mail,
+  Phone,
+  Linkedin,
+  MessageSquare,
+  Sparkles,
+  Loader2,
+  X,
+  Plus,
+  Check
+} from 'lucide-react';
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import PageHeader from '../components/shared/PageHeader';
+import { cn } from "@/lib/utils";
+
+export default function AddConnection() {
+  const navigate = useNavigate();
+  const [inputMode, setInputMode] = useState('manual');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [audioBlob, setAudioBlob] = useState(null);
+  const [transcript, setTranscript] = useState('');
+  const [newInterest, setNewInterest] = useState('');
+  const [newTag, setNewTag] = useState('');
+  
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]);
+
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    linkedin_url: '',
+    company: '',
+    role: '',
+    how_we_met: '',
+    meeting_date: format(new Date(), 'yyyy-MM-dd'),
+    common_interests: [],
+    career_interests: '',
+    personal_details: '',
+    conversation_notes: '',
+    tags: [],
+    relationship_strength: 'new',
+    follow_up_frequency: 'monthly',
+  });
+
+  const updateField = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const addInterest = () => {
+    if (newInterest.trim() && !formData.common_interests.includes(newInterest.trim())) {
+      updateField('common_interests', [...formData.common_interests, newInterest.trim()]);
+      setNewInterest('');
+    }
+  };
+
+  const removeInterest = (interest) => {
+    updateField('common_interests', formData.common_interests.filter(i => i !== interest));
+  };
+
+  const addTag = () => {
+    if (newTag.trim() && !formData.tags.includes(newTag.trim())) {
+      updateField('tags', [...formData.tags, newTag.trim()]);
+      setNewTag('');
+    }
+  };
+
+  const removeTag = (tag) => {
+    updateField('tags', formData.tags.filter(t => t !== tag));
+  };
+
+  const startRecording = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorderRef.current = new MediaRecorder(stream);
+    chunksRef.current = [];
+
+    mediaRecorderRef.current.ondataavailable = (e) => {
+      chunksRef.current.push(e.data);
+    };
+
+    mediaRecorderRef.current.onstop = () => {
+      const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+      setAudioBlob(blob);
+      stream.getTracks().forEach(track => track.stop());
+    };
+
+    mediaRecorderRef.current.start();
+    setIsRecording(true);
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const processVoiceNote = async () => {
+    if (!audioBlob) return;
+    
+    setIsProcessing(true);
+    
+    const file = new File([audioBlob], 'voice-note.webm', { type: 'audio/webm' });
+    const { file_url } = await base44.integrations.Core.UploadFile({ file });
+
+    const result = await base44.integrations.Core.InvokeLLM({
+      prompt: `You are an assistant helping to extract contact and meeting information from a voice note about a professional connection. Extract the following information if mentioned:
+      
+- Name of the person
+- Their company/organization
+- Their role/title
+- How we met (context)
+- Common interests or topics discussed
+- Their career interests or goals
+- Any personal details mentioned (family, hobbies, etc.)
+- Key conversation points
+
+Be thorough and extract as much relevant information as possible.`,
+      file_urls: [file_url],
+      response_json_schema: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          company: { type: "string" },
+          role: { type: "string" },
+          how_we_met: { type: "string" },
+          common_interests: { type: "array", items: { type: "string" } },
+          career_interests: { type: "string" },
+          personal_details: { type: "string" },
+          conversation_notes: { type: "string" },
+          transcript: { type: "string" }
+        }
+      }
+    });
+
+    setFormData(prev => ({
+      ...prev,
+      name: result.name || prev.name,
+      company: result.company || prev.company,
+      role: result.role || prev.role,
+      how_we_met: result.how_we_met || prev.how_we_met,
+      common_interests: result.common_interests?.length ? result.common_interests : prev.common_interests,
+      career_interests: result.career_interests || prev.career_interests,
+      personal_details: result.personal_details || prev.personal_details,
+      conversation_notes: result.conversation_notes || prev.conversation_notes,
+    }));
+    
+    if (result.transcript) {
+      setTranscript(result.transcript);
+    }
+
+    setIsProcessing(false);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!formData.name.trim()) return;
+
+    setIsProcessing(true);
+
+    // Create the connection
+    const connection = await base44.entities.Connection.create({
+      ...formData,
+      last_interaction_date: formData.meeting_date,
+      interaction_count: 1
+    });
+
+    // Create initial interaction
+    await base44.entities.Interaction.create({
+      connection_id: connection.id,
+      type: 'meeting',
+      date: formData.meeting_date,
+      summary: formData.how_we_met,
+      detailed_notes: formData.conversation_notes,
+      key_topics: formData.common_interests,
+    });
+
+    // Generate AI follow-up suggestions
+    const aiSuggestion = await base44.integrations.Core.InvokeLLM({
+      prompt: `Based on this new professional connection, generate a personalized follow-up message to send within 24 hours.
+
+Connection details:
+- Name: ${formData.name}
+- Company: ${formData.company}
+- Role: ${formData.role}
+- How we met: ${formData.how_we_met}
+- Common interests: ${formData.common_interests.join(', ')}
+- Conversation notes: ${formData.conversation_notes}
+
+Create a warm, genuine follow-up message that references specific topics from our conversation. Keep it professional but personable. Also provide context for why this follow-up is appropriate.`,
+      response_json_schema: {
+        type: "object",
+        properties: {
+          message: { type: "string" },
+          context: { type: "string" }
+        }
+      }
+    });
+
+    // Create initial follow-up for 24 hours later
+    await base44.entities.FollowUp.create({
+      connection_id: connection.id,
+      connection_name: formData.name,
+      due_date: format(addDays(new Date(), 1), 'yyyy-MM-dd'),
+      type: 'initial_followup',
+      status: 'pending',
+      suggested_message: aiSuggestion.message,
+      context: aiSuggestion.context,
+      priority: 'high'
+    });
+
+    // Create a 7-day follow-up
+    await base44.entities.FollowUp.create({
+      connection_id: connection.id,
+      connection_name: formData.name,
+      due_date: format(addDays(new Date(), 7), 'yyyy-MM-dd'),
+      type: 'weekly_checkin',
+      status: 'pending',
+      context: 'One week check-in to keep the conversation going',
+      priority: 'medium'
+    });
+
+    setIsProcessing(false);
+    navigate(createPageUrl(`ConnectionProfile?id=${connection.id}`));
+  };
+
+  return (
+    <div className="max-w-3xl mx-auto">
+      <PageHeader 
+        title="Add Connection"
+        subtitle="Record a new professional relationship"
+        backLink="Connections"
+      />
+
+      {/* Input Mode Tabs */}
+      <Tabs value={inputMode} onValueChange={setInputMode} className="mb-8">
+        <TabsList className="grid w-full grid-cols-2 bg-white border border-slate-200 p-1">
+          <TabsTrigger 
+            value="voice" 
+            className="data-[state=active]:bg-indigo-50 data-[state=active]:text-indigo-700"
+          >
+            <Mic className="h-4 w-4 mr-2" />
+            Voice Note
+          </TabsTrigger>
+          <TabsTrigger 
+            value="manual" 
+            className="data-[state=active]:bg-indigo-50 data-[state=active]:text-indigo-700"
+          >
+            <FileText className="h-4 w-4 mr-2" />
+            Manual Entry
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="voice" className="mt-6">
+          <div className="bg-white rounded-2xl border border-slate-200 p-8">
+            <div className="text-center">
+              <div className="mb-6">
+                <div className={cn(
+                  "w-24 h-24 rounded-full mx-auto flex items-center justify-center transition-all duration-300",
+                  isRecording 
+                    ? "bg-red-100 animate-pulse" 
+                    : audioBlob 
+                      ? "bg-emerald-100"
+                      : "bg-indigo-100"
+                )}>
+                  {isRecording ? (
+                    <MicOff className="h-10 w-10 text-red-600" />
+                  ) : audioBlob ? (
+                    <Check className="h-10 w-10 text-emerald-600" />
+                  ) : (
+                    <Mic className="h-10 w-10 text-indigo-600" />
+                  )}
+                </div>
+              </div>
+
+              <h3 className="text-lg font-semibold text-slate-900 mb-2">
+                {isRecording 
+                  ? "Recording..." 
+                  : audioBlob 
+                    ? "Recording Complete" 
+                    : "Record a Voice Note"}
+              </h3>
+              <p className="text-slate-500 mb-6 max-w-md mx-auto">
+                {isRecording 
+                  ? "Describe your meeting - who you met, what you discussed, and key details to remember." 
+                  : audioBlob
+                    ? "Your voice note is ready. Process it to extract contact details."
+                    : "Quickly capture meeting details in 30-60 seconds. AI will extract the key information."}
+              </p>
+
+              <div className="flex justify-center gap-3">
+                {!audioBlob ? (
+                  <Button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    size="lg"
+                    className={cn(
+                      "px-8",
+                      isRecording 
+                        ? "bg-red-600 hover:bg-red-700" 
+                        : "bg-indigo-600 hover:bg-indigo-700"
+                    )}
+                  >
+                    {isRecording ? (
+                      <>
+                        <MicOff className="h-5 w-5 mr-2" />
+                        Stop Recording
+                      </>
+                    ) : (
+                      <>
+                        <Mic className="h-5 w-5 mr-2" />
+                        Start Recording
+                      </>
+                    )}
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      onClick={() => { setAudioBlob(null); setTranscript(''); }}
+                    >
+                      <X className="h-4 w-4 mr-2" />
+                      Discard
+                    </Button>
+                    <Button
+                      onClick={processVoiceNote}
+                      disabled={isProcessing}
+                      className="bg-indigo-600 hover:bg-indigo-700"
+                    >
+                      {isProcessing ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Processing...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="h-4 w-4 mr-2" />
+                          Process with AI
+                        </>
+                      )}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit} className="space-y-8">
+        {/* Basic Info */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-6">
+          <h3 className="font-semibold text-slate-900 mb-4 flex items-center gap-2">
+            <User className="h-5 w-5 text-indigo-500" />
+            Basic Information
+          </h3>
+          
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <Label htmlFor="name">Name *</Label>
+              <Input
+                id="name"
+                value={formData.name}
+                onChange={(e) => updateField('name', e.target.value)}
+                placeholder="John Doe"
+                className="mt-1"
+                required
+              />
+            </div>
+            <div>
+              <Label htmlFor="meeting_date">Meeting Date</Label>
+              <Input
+                id="meeting_date"
+                type="date"
+                value={formData.meeting_date}
+                onChange={(e) => updateField('meeting_date', e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <Label htmlFor="company">Company</Label>
+              <div className="relative mt-1">
+                <Building2 className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <Input
+                  id="company"
+                  value={formData.company}
+                  onChange={(e) => updateField('company', e.target.value)}
+                  placeholder="Acme Inc."
+                  className="pl-10"
+                />
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="role">Role</Label>
+              <Input
+                id="role"
+                value={formData.role}
+                onChange={(e) => updateField('role', e.target.value)}
+                placeholder="Product Manager"
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <Label htmlFor="email">Email</Label>
+              <div className="relative mt-1">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <Input
+                  id="email"
+                  type="email"
+                  value={formData.email}
+                  onChange={(e) => updateField('email', e.target.value)}
+                  placeholder="john@example.com"
+                  className="pl-10"
+                />
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="phone">Phone</Label>
+              <div className="relative mt-1">
+                <Phone className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <Input
+                  id="phone"
+                  value={formData.phone}
+                  onChange={(e) => updateField('phone', e.target.value)}
+                  placeholder="+1 (555) 123-4567"
+                  className="pl-10"
+                />
+              </div>
+            </div>
+            <div className="sm:col-span-2">
+              <Label htmlFor="linkedin">LinkedIn URL</Label>
+              <div className="relative mt-1">
+                <Linkedin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <Input
+                  id="linkedin"
+                  value={formData.linkedin_url}
+                  onChange={(e) => updateField('linkedin_url', e.target.value)}
+                  placeholder="https://linkedin.com/in/johndoe"
+                  className="pl-10"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Meeting Details */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-6">
+          <h3 className="font-semibold text-slate-900 mb-4 flex items-center gap-2">
+            <MessageSquare className="h-5 w-5 text-indigo-500" />
+            Meeting Details
+          </h3>
+          
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="how_we_met">How We Met</Label>
+              <Input
+                id="how_we_met"
+                value={formData.how_we_met}
+                onChange={(e) => updateField('how_we_met', e.target.value)}
+                placeholder="Met at the Tech Conference 2024 networking event"
+                className="mt-1"
+              />
+            </div>
+            
+            <div>
+              <Label>Common Interests</Label>
+              <div className="flex flex-wrap gap-2 mt-2 mb-2">
+                {formData.common_interests.map(interest => (
+                  <Badge key={interest} variant="secondary" className="bg-indigo-50 text-indigo-700 pl-3 pr-1 py-1">
+                    {interest}
+                    <button 
+                      type="button"
+                      onClick={() => removeInterest(interest)}
+                      className="ml-2 hover:text-red-600"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={newInterest}
+                  onChange={(e) => setNewInterest(e.target.value)}
+                  placeholder="Add an interest..."
+                  onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addInterest())}
+                />
+                <Button type="button" variant="outline" onClick={addInterest}>
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+
+            <div>
+              <Label htmlFor="conversation_notes">Conversation Notes</Label>
+              <Textarea
+                id="conversation_notes"
+                value={formData.conversation_notes}
+                onChange={(e) => updateField('conversation_notes', e.target.value)}
+                placeholder="Key points from your conversation..."
+                className="mt-1 h-32"
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="career_interests">Their Career Interests</Label>
+              <Textarea
+                id="career_interests"
+                value={formData.career_interests}
+                onChange={(e) => updateField('career_interests', e.target.value)}
+                placeholder="What are they looking to achieve professionally?"
+                className="mt-1"
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="personal_details">Personal Details</Label>
+              <Textarea
+                id="personal_details"
+                value={formData.personal_details}
+                onChange={(e) => updateField('personal_details', e.target.value)}
+                placeholder="Family, hobbies, or other personal info mentioned..."
+                className="mt-1"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Settings */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-6">
+          <h3 className="font-semibold text-slate-900 mb-4 flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-indigo-500" />
+            Relationship Settings
+          </h3>
+          
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <Label>Relationship Strength</Label>
+              <Select value={formData.relationship_strength} onValueChange={(v) => updateField('relationship_strength', v)}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="new">New Connection</SelectItem>
+                  <SelectItem value="developing">Developing</SelectItem>
+                  <SelectItem value="warm">Warm</SelectItem>
+                  <SelectItem value="strong">Strong</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Follow-up Frequency</Label>
+              <Select value={formData.follow_up_frequency} onValueChange={(v) => updateField('follow_up_frequency', v)}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="weekly">Weekly</SelectItem>
+                  <SelectItem value="biweekly">Bi-weekly</SelectItem>
+                  <SelectItem value="monthly">Monthly</SelectItem>
+                  <SelectItem value="quarterly">Quarterly</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            
+            <div className="sm:col-span-2">
+              <Label>Tags</Label>
+              <div className="flex flex-wrap gap-2 mt-2 mb-2">
+                {formData.tags.map(tag => (
+                  <Badge key={tag} variant="outline" className="pl-3 pr-1 py-1">
+                    {tag}
+                    <button 
+                      type="button"
+                      onClick={() => removeTag(tag)}
+                      className="ml-2 hover:text-red-600"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={newTag}
+                  onChange={(e) => setNewTag(e.target.value)}
+                  placeholder="Add a tag (e.g., investor, mentor, potential hire)..."
+                  onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addTag())}
+                />
+                <Button type="button" variant="outline" onClick={addTag}>
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Submit */}
+        <div className="flex justify-end gap-3">
+          <Button type="button" variant="outline" onClick={() => navigate(createPageUrl('Connections'))}>
+            Cancel
+          </Button>
+          <Button 
+            type="submit" 
+            disabled={!formData.name.trim() || isProcessing}
+            className="bg-gradient-to-r from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 shadow-lg shadow-indigo-500/25"
+          >
+            {isProcessing ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Creating...
+              </>
+            ) : (
+              <>
+                <Check className="h-4 w-4 mr-2" />
+                Save Connection
+              </>
+            )}
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}

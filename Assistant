@@ -1,0 +1,340 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { base44 } from '@/api/base44Client';
+import { 
+  Send, 
+  Bot,
+  User,
+  Loader2,
+  Sparkles,
+  Plus,
+  MessageSquare,
+  Trash2
+} from 'lucide-react';
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import PageHeader from '../components/shared/PageHeader';
+import MessageBubble from '../components/chat/MessageBubble';
+import { cn } from "@/lib/utils";
+
+const AGENT_NAME = 'network_assistant';
+
+export default function Assistant() {
+  const [conversations, setConversations] = useState([]);
+  const [currentConversation, setCurrentConversation] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [inputValue, setInputValue] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSending, setIsSending] = useState(false);
+  const [deleteDialog, setDeleteDialog] = useState(null);
+  
+  const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Load conversations
+  useEffect(() => {
+    loadConversations();
+  }, []);
+
+  // Subscribe to current conversation
+  useEffect(() => {
+    if (!currentConversation?.id) return;
+
+    const unsubscribe = base44.agents.subscribeToConversation(
+      currentConversation.id,
+      (data) => {
+        setMessages(data.messages || []);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [currentConversation?.id]);
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const loadConversations = async () => {
+    setIsLoading(true);
+    const convos = await base44.agents.listConversations({ agent_name: AGENT_NAME });
+    setConversations(convos || []);
+    
+    if (convos?.length > 0) {
+      const latest = await base44.agents.getConversation(convos[0].id);
+      setCurrentConversation(latest);
+      setMessages(latest.messages || []);
+    }
+    
+    setIsLoading(false);
+  };
+
+  const createNewConversation = async () => {
+    const newConvo = await base44.agents.createConversation({
+      agent_name: AGENT_NAME,
+      metadata: {
+        name: `Chat ${new Date().toLocaleDateString()}`,
+      }
+    });
+    
+    setConversations(prev => [newConvo, ...prev]);
+    setCurrentConversation(newConvo);
+    setMessages([]);
+    inputRef.current?.focus();
+  };
+
+  const selectConversation = async (convo) => {
+    const full = await base44.agents.getConversation(convo.id);
+    setCurrentConversation(full);
+    setMessages(full.messages || []);
+  };
+
+  const deleteConversation = async (convoId) => {
+    // Note: The base44 SDK may not have a delete conversation method
+    // This is a placeholder - in real implementation, you'd need the proper API
+    setConversations(prev => prev.filter(c => c.id !== convoId));
+    if (currentConversation?.id === convoId) {
+      const remaining = conversations.filter(c => c.id !== convoId);
+      if (remaining.length > 0) {
+        selectConversation(remaining[0]);
+      } else {
+        setCurrentConversation(null);
+        setMessages([]);
+      }
+    }
+    setDeleteDialog(null);
+  };
+
+  const sendMessage = async () => {
+    if (!inputValue.trim() || isSending) return;
+
+    const messageContent = inputValue.trim();
+    setInputValue('');
+    setIsSending(true);
+
+    let convo = currentConversation;
+    
+    if (!convo) {
+      convo = await base44.agents.createConversation({
+        agent_name: AGENT_NAME,
+        metadata: {
+          name: messageContent.slice(0, 50) + (messageContent.length > 50 ? '...' : ''),
+        }
+      });
+      setConversations(prev => [convo, ...prev]);
+      setCurrentConversation(convo);
+    }
+
+    await base44.agents.addMessage(convo, {
+      role: 'user',
+      content: messageContent
+    });
+
+    setIsSending(false);
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const suggestedQuestions = [
+    "Who should I reach out to for a product management role?",
+    "Prepare me for my meeting with [name]",
+    "Who in my network works in healthcare tech?",
+    "Which connections should I nurture more?",
+    "Who have I not talked to in a while?"
+  ];
+
+  if (isLoading) {
+    return (
+      <div className="h-[calc(100vh-8rem)] flex gap-6">
+        <div className="w-72 space-y-3">
+          {[1,2,3].map(i => <Skeleton key={i} className="h-16 rounded-xl" />)}
+        </div>
+        <div className="flex-1">
+          <Skeleton className="h-full rounded-2xl" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-[calc(100vh-8rem)] flex flex-col lg:flex-row gap-6">
+      {/* Sidebar - Conversations */}
+      <div className="w-full lg:w-72 flex-shrink-0 order-2 lg:order-1">
+        <div className="bg-white rounded-2xl border border-slate-200 h-full flex flex-col">
+          <div className="p-4 border-b">
+            <Button 
+              onClick={createNewConversation}
+              className="w-full bg-gradient-to-r from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              New Chat
+            </Button>
+          </div>
+          
+          <ScrollArea className="flex-1 p-3">
+            <div className="space-y-2">
+              {conversations.map(convo => (
+                <button
+                  key={convo.id}
+                  onClick={() => selectConversation(convo)}
+                  className={cn(
+                    "w-full text-left p-3 rounded-xl transition-all group",
+                    currentConversation?.id === convo.id
+                      ? "bg-indigo-50 border border-indigo-200"
+                      : "hover:bg-slate-50 border border-transparent"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <MessageSquare className={cn(
+                      "h-5 w-5 flex-shrink-0 mt-0.5",
+                      currentConversation?.id === convo.id ? "text-indigo-600" : "text-slate-400"
+                    )} />
+                    <div className="flex-1 min-w-0">
+                      <p className={cn(
+                        "font-medium truncate text-sm",
+                        currentConversation?.id === convo.id ? "text-indigo-700" : "text-slate-700"
+                      )}>
+                        {convo.metadata?.name || 'New Chat'}
+                      </p>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {new Date(convo.created_date).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDeleteDialog(convo.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-100 text-slate-400 hover:text-red-600 transition-all"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </button>
+              ))}
+              
+              {conversations.length === 0 && (
+                <div className="text-center py-8 text-slate-500 text-sm">
+                  No conversations yet
+                </div>
+              )}
+            </div>
+          </ScrollArea>
+        </div>
+      </div>
+
+      {/* Main Chat Area */}
+      <div className="flex-1 bg-white rounded-2xl border border-slate-200 flex flex-col min-h-0 order-1 lg:order-2">
+        {/* Chat Header */}
+        <div className="p-4 border-b flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-600">
+            <Bot className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h2 className="font-semibold text-slate-900">Network Assistant</h2>
+            <p className="text-xs text-slate-500">Ask me anything about your connections</p>
+          </div>
+        </div>
+
+        {/* Messages */}
+        <ScrollArea className="flex-1 p-4">
+          {messages.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-center p-6">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-100 to-indigo-200 flex items-center justify-center mb-4">
+                <Sparkles className="h-8 w-8 text-indigo-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-slate-900 mb-2">
+                How can I help with your network?
+              </h3>
+              <p className="text-slate-500 max-w-md mb-6">
+                I can help you find connections, prepare for meetings, and manage your professional relationships.
+              </p>
+              
+              <div className="grid gap-2 w-full max-w-lg">
+                {suggestedQuestions.map((question, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setInputValue(question)}
+                    className="text-left p-3 rounded-xl border border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/50 transition-colors text-sm text-slate-600 hover:text-indigo-700"
+                  >
+                    {question}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4 pb-4">
+              {messages.map((message, index) => (
+                <MessageBubble key={index} message={message} />
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </ScrollArea>
+
+        {/* Input Area */}
+        <div className="p-4 border-t">
+          <div className="flex gap-3">
+            <Input
+              ref={inputRef}
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyPress={handleKeyPress}
+              placeholder="Ask about your network..."
+              className="flex-1"
+              disabled={isSending}
+            />
+            <Button 
+              onClick={sendMessage}
+              disabled={!inputValue.trim() || isSending}
+              className="bg-indigo-600 hover:bg-indigo-700 px-4"
+            >
+              {isSending ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : (
+                <Send className="h-5 w-5" />
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Delete Dialog */}
+      <AlertDialog open={!!deleteDialog} onOpenChange={() => setDeleteDialog(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Conversation</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this conversation? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={() => deleteConversation(deleteDialog)}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
